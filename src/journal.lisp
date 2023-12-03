@@ -30,7 +30,6 @@
 
 
 (defun wrap (val) (if val (list :value val) nil))
-(export #:wrap)
 (defun unwrap (a) (getf a :value))
 (defun bind (a fn) (let ((val (unwrap a))) (if val (wrap (funcall fn val)) nil)))
 (defun chain (initial &rest funcs)
@@ -80,4 +79,3 @@
 	)
     )
   )
-;;

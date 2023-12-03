@@ -2,4 +2,4 @@
 
 set -xe
 
-sbcl --load build.lisp
+sbcl --non-interactive --load build.lisp

@@ -1,2 +1,6 @@
-(load (compile-file "main.lisp"))
-(sb-ext:save-lisp-and-die "hello" :toplevel #'main :executable t)
+(load "init.lisp")
+(let ((filename
+	(namestring (make-pathname :directory '(:relative "dist")
+		       :name (or (second *posix-argv*) "ledger")))))
+  (sb-ext:save-lisp-and-die filename :toplevel #'main :executable t)
+  )
