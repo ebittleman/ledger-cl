@@ -28,12 +28,19 @@
 
 (defun add-transaction (record) (push record *general-journal*))
 
-
 (defun wrap (val) (if val (list :value val) nil))
 (defun unwrap (a) (getf a :value))
 (defun bind (a fn) (let ((val (unwrap a))) (if val (wrap (funcall fn val)) nil)))
 (defun chain (initial &rest funcs)
   (reduce #'(lambda (a func) (bind a func)) funcs :initial-value (wrap initial)))
+
+(defun safe_divide (a b) (if (eq b 0) nil (/ a b)))
+;; (chain 4
+;;        #'(lambda (x) (* x 2))
+;;        #'(lambda (x) (- 6 x))
+;;        #'(lambda (x) (safe_divide 2 x))
+;;        #'(lambda (x) (* 2 x))
+;;        )
 
 (defun curry (function &rest args)
   (lambda (&rest more-args)
@@ -53,9 +60,10 @@
 (defun filter (pred items) (loop for x in items
 				 for result = (funcall pred x) when result collect x))
 
-;; (defun useless (fn &rest a) (eval `(funcall ,fn ,@a)))
+(defun sumlist (a) (apply #'+ a))
+(defun sumeq (a b) (eq (sumlist a) (sumlist b)))
 
-(defun mk-partial-transaction (acct amount) (list :acct acct :amount amount))
+(defun mk-partial-transaction (acct amount) (list :acct acct :amount (or amount 0)))
 
 (defun get-acct (a) (getf a :acct))
 (defun get-amount (a) (getf a :amount 0))
@@ -64,17 +72,16 @@
 			     (raw-materials-inventory nil)
 			     (merchandise-inventory nil)
 			     (purchasing-account nil))
-  (let* ((raw-amount (get-amount raw-materials-inventory))
-	 (merch-amount (get-amount merchandise-inventory))
-	 (raw-acct (get-acct raw-materials-inventory))
-	 (merch-acct (get-acct merchandise-inventory))
-	 (debits (+ raw-amount merch-amount))
-	 (credits (get-amount purchasing-account))
-	 )
-    (if (eq debits credits)
+  (let (
+	(debits (list (get-amount raw-materials-inventory) (get-amount merchandise-inventory)))
+	(credits (list (get-amount purchasing-account)))
+	(raw-acct (get-acct raw-materials-inventory))
+	(merch-acct (get-acct merchandise-inventory))
+	)
+    (if (sumeq debits credits)
 	(list
-	 (if (> raw-amount 0) (mk-transaction :account-code raw-acct :balance-sheet-debit raw-amount))
-	 (if (> merch-amount 0) (mk-transaction :account-code merch-acct :balance-sheet-debit merch-amount)))
+	 (if (> (first debits) 0) (mk-transaction :account-code raw-acct :balance-sheet-debit (first debits)))
+	 (if (> (second debits) 0) (mk-transaction :account-code merch-acct :balance-sheet-debit (second debits))))
         (format t "mismatch ~a != ~a" debits credits)
 	)
     )
