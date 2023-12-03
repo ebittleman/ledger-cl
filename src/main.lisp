@@ -1,4 +1,4 @@
 (require "ledger-cl")
 
 (defun main ()
-  (format t "hello, value: ~a ~%" (ledger-cl:wrap 5)))
+  (format t "hello, value: ~a~%" (ledger-cl:wrap 5)))
