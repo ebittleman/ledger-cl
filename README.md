@@ -9,5 +9,5 @@ General Journal and Ledger implemenation in Common List (sbcl)
 Quicklisp should be installed into the vendor folder
 
 ```shell
-sbcl --load "$QUICKLISP" --eval '(quicklisp-quickstart:install :path "./vendor")' --quit
+sbcl --non-interactive --load "$QUICKLISP" --eval '(quicklisp-quickstart:install :path "./vendor")'
 ```

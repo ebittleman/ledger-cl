@@ -2,4 +2,4 @@
 
 set -xe
 
-sbcl --non-interactive --load build.lisp
+sbcl --non-interactive --load init.lisp --eval "(asdf:make :ledger-cl)"
