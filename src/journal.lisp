@@ -28,6 +28,11 @@
 
 (defun add-transaction (record) (push record *general-journal*))
 
+(define-condition value-error (error)
+  ((message :initarg :message :reader message))
+  (:report (lambda (condition stream)(format stream "~a~&" (message condition))))
+  )
+
 (defun wrap (val) (if val (list :value val) nil))
 (defun unwrap (a) (getf a :value))
 (defun bind (a fn) (let ((val (unwrap a))) (if val (wrap (funcall fn val)) nil)))
@@ -103,7 +108,13 @@
   )
 
 
+(defun periodic-cog (begin-inv net-purchase end-inv)
+  (- (+ begin-inv net-purchase) end-inv))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+(defun append-reference (plist)
+  (append plist (list :ref (uuid::make-v4-uuid))))
 
 (defparameter *acct-classifications*
   (list
@@ -133,7 +144,6 @@
    :direct-costs :expense
    :expense :expense))
 
-
 (defun mk-acct (number kind &optional (name nil))
   (let ((class (getf *acct-kinds* kind)))
     (if class
@@ -142,22 +152,50 @@
 	      :class class
 	      :normal (getf *acct-classifications* class)
 	      :name (if name name (format nil "~a-~a" number kind)))
-	nil)))
+	(error 'value-error :message (format nil "unknown account kind: ~a" kind)))))
 
-(defun put-acct (tbl acct)
-  (setf (gethash (car acct) tbl) (apply #'mk-acct acct)))
+(defun build-table (map-func key-func tbl items)
+  (mapcar
+   #'(lambda (item) (setf (gethash (funcall key-func item) tbl) (apply map-func item)))
+   items))
 
 (defun build-accts-table (tbl accts)
-    (mapcar
-     #'(lambda (acct)(put-acct tbl acct))
-     accts))
+    (build-table #'mk-acct #'car tbl accts))
 
 (defun mk-tx (acct debit-amt credit-amt)
   (list :acct-number (getf acct :number)
 	:debit debit-amt
 	:credit credit-amt))
 
+(defun mk-product (sku name &optional (upc nil))
+  (list :sku sku :name name :upc upc))
+
+(defun build-products-table (tbl item-args)
+  )
+
+(defun mk-inventory-batch (product qty cost)
+  (list :sku (getf product :sku) :qty qty :cost cost :qty-allocated 0))
+
+(defun get-history (tbl product)
+  (let ((sku (getf product :sku)))
+    (if (and product sku)
+	(let ((history (gethash sku tbl)))
+	  (if history history
+	      (setf (gethash sku tbl) (make-array 1 :fill-pointer 0 :adjustable t))))
+	(error 'value-error :message "sku cannot be nil"))))
+
+(defun put-batch (tbl batch)
+  (vector-push-extend batch (get-history tbl batch)))
+
+(defun receive-product (product qty cost inventory-acct payable-acct)
+  (values (append-reference (mk-inventory-batch product qty cost))
+	  (mk-tx inventory-acct (* qty cost) 0.0)
+	  (mk-tx payable-acct 0.0 (* qty cost))))
+
+
 (defparameter *accounts* (make-hash-table))
+(defparameter *product-table* (make-hash-table :test #'EQUAL))
+(defparameter *batch-history* (make-hash-table :test #'EQUAL))
 
 (defparameter *acct-list*
   (list
@@ -182,33 +220,10 @@
    '(6001 :expense "General Expenses")
    ))
 
-(defun periodic-cog (begin-inv net-purchase end-inv)
-  (- (+ begin-inv net-purchase) end-inv))
+(defparameter *products*
+  (list
+   '("PROD-001" "Example Product")
+   '("PROD-002" "Another Product")
+   '("PROD-003" "Last Thing We Work With" 123456)))
 
-(defun mk-product (sku name &optional (upc nil))
-  (list :sku sku :name name :upc upc))
-
-(defun mk-inv-batch (sku qty cost)
-  (list :sku sku :qty qty :cost cost))
-
-(defun receive-product (sku qty cost)
-  (let ((batch (mk-inv-batch sku qty cost)))
-   (append batch (list :ref (uuid::make-v4-uuid))) ))
-
-(defun get-history (tbl sku)
-  (if sku
-      (let ((history (gethash sku tbl)))
-	(if history history
-	    (setf (gethash sku tbl) (make-array 5 :fill-pointer 0 :adjustable t)))
-	)
-      nil))
-
-(defun put-batch (tbl batch)
-  (let* ((sku (getf batch :sku))
-	 (history (get-history tbl sku)))
-    (if history
-	(vector-push-extend batch history)
-	nil)))
-
-(defparameter *batch-history* (make-hash-table :test #'EQUAL))
 
