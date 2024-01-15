@@ -47,14 +47,18 @@
     (apply function (append args more-args))))
 
 (defmacro dcons((var1 var2 pair) &body body)
-  `(let ((,var1 (car ,pair))
-	 (,var2 (cdr ,pair)))
-     ,@body))
+  (let ((tmp-eval (gensym)))
+    `(let* ((,tmp-eval ,pair)
+	    (,var1 (car ,tmp-eval))
+	    (,var2 (cdr ,tmp-eval)))
+       ,@body)))
 
 (defun zip (fn list1 list2)
   (mapcar #'(lambda (pair)
 	      (dcons (a b pair) (funcall fn a b)))
 	  (pairlis list1 list2)))
+
+(defun print-map (map) (maphash #'(lambda (k v) (format t "~a => ~a~%" k v)) map))
 
 (defun default-value (val) (curry #'(lambda (a i) (or i a)) val))
 
@@ -101,17 +105,44 @@
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(defparameter *acct-types*
+(defparameter *acct-classifications*
   (list
    :asset 1.0 :liability -1.0
    :equity -1.0
    :revenue -1.0 :expense 1.0))
 
+(defparameter *acct-kinds*
+  (list
+   :bank :asset
+   :ar :asset
+   :current-asset :asset
+   :inventory :asset
+   :fixed-asset :asset
+   :ap :liability
+   :current-liability :liability
+   :unpaid-expense-claim :liability
+   :wages-payable :liability
+   :sales-tax :sales-tax
+   :historical-adjustment :liability
+   :rounding :liability
+   :tracking :liability
+   :non-current-liability :liability
+   :equity :equity
+   :retained-earnings :equity
+   :revenue :revenue
+   :direct-costs :expense
+   :expense :expense))
+
+
 (defun mk-acct (number kind &optional (name nil))
-  (list :number number
-	:kind kind
-	:normal (getf *acct-types* kind)
-	:name (if name name (format nil "~a-~a" number kind))))
+  (let ((class (getf *acct-kinds* kind)))
+    (if class
+	(list :number number
+	      :kind kind
+	      :class class
+	      :normal (getf *acct-classifications* class)
+	      :name (if name name (format nil "~a-~a" number kind)))
+	nil)))
 
 (defun put-acct (tbl acct)
   (setf (gethash (car acct) tbl) (apply #'mk-acct acct)))
@@ -130,12 +161,54 @@
 
 (defparameter *acct-list*
   (list
-   '(1001 :asset "Checking Account")
-   '(1002 :asset "Savings Account")
-   '(1101 :asset "Accounts Receivable")
-   '(1401 :asset "Inventory - Finished Goods")
-   '(1402 :asset "Inventory - Raw Materials")
-   '(1403 :asset "Inventory - Work In Progress")
+   '(1001 :bank "Checking Account")
+   '(1002 :bank "Savings Account")
+   '(1101 :ar "Accounts Receivable")
+   '(1401 :inventory "Inventory - Finished Goods")
+   '(1402 :inventory "Inventory - Raw Materials")
+   '(1403 :inventory "Inventory - Work In Progress")
+   '(1404 :inventory "Inventory - Goods In Transit")
+   '(2001 :ap "Accounts Payable")
+   '(2050 :current-liability "Accruals")
+   '(3001 :equity "Owners Contribution")
+   '(3101 :equity "Owners Draw")
+   '(3201 :retained-earnings "Retained Earnings")
+   '(3501 :equity "Common Stock")
+   '(4001 :revenue "Sales")
+   '(4601 :revenue "Other Revenue")
+   '(4701 :revenue "Interest Income")
+   '(4801 :revenue "Refunds")
+   '(5001 :direct-costs "Cost of Goods Sold")
+   '(6001 :expense "General Expenses")
    ))
 
+(defun periodic-cog (begin-inv net-purchase end-inv)
+  (- (+ begin-inv net-purchase) end-inv))
+
+(defun mk-product (sku name &optional (upc nil))
+  (list :sku sku :name name :upc upc))
+
+(defun mk-inv-batch (sku qty cost)
+  (list :sku sku :qty qty :cost cost))
+
+(defun receive-product (sku qty cost)
+  (let ((batch (mk-inv-batch sku qty cost)))
+   (append batch (list :ref (uuid::make-v4-uuid))) ))
+
+(defun get-history (tbl sku)
+  (if sku
+      (let ((history (gethash sku tbl)))
+	(if history history
+	    (setf (gethash sku tbl) (make-array 5 :fill-pointer 0 :adjustable t)))
+	)
+      nil))
+
+(defun put-batch (tbl batch)
+  (let* ((sku (getf batch :sku))
+	 (history (get-history tbl sku)))
+    (if history
+	(vector-push-extend batch history)
+	nil)))
+
+(defparameter *batch-history* (make-hash-table :test #'EQUAL))
 

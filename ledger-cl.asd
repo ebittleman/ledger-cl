@@ -4,7 +4,7 @@
   :description "Common general journal and ledger library"
   :license "MIT"
   :author "Eric Bittleman<eric.bittleman@gmail.com>"
-  :depends-on (#:parse-float)
+  :depends-on (#:parse-float #:uuid)
   :components ((:module "src"
 		:components
 		((:file "package")
