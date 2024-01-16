@@ -148,16 +148,15 @@
   (vector-push-extend batch (get-history tbl batch)))
 
 (defun receive-product-tx (product qty cost inventory-acct payable-acct)
-  (values (append-ref (mk-inventory-batch product qty cost))
-	  (mk-tx inventory-acct (* qty cost) 0.0)
-	  (mk-tx payable-acct 0.0 (* qty cost))))
+  (let ((amt (* qty cost)))
+    (values (append-ref (mk-inventory-batch product qty cost))
+	    (mk-tx inventory-acct amt 0.0)
+	    (mk-tx payable-acct 0.0 amt))))
 
 (defmacro get-items ((items tables) &body body)
   `(let ,(loop for i in items collect
 	       `(,(car i) (gethash ,(second i) (getf ,tables ,(third i)))))
      ,@body))
-
-
 
 (defun mk-receiver-line (sku qty cost debit credit)
   (list :sku sku :qty qty :cost cost :debit debit :credit credit))
