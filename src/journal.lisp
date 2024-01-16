@@ -42,23 +42,23 @@
       ,@body
       (error 'value-error :message ,msg)))
 
+(defmacro using (plist using-form)
+  (let((tmp-var (gensym))
+       (fn (car using-form))
+       (args (cdr using-form)))
+    `(let ((,tmp-var ,plist))(apply #',fn (append (list ,@args) ,tmp-var)))))
+
 (defun print-map (map) (maphash #'(lambda (k v) (format t "~a => ~a~%" k v)) map))
 
 (defun default-value (val) (curry #'(lambda (a i) (or i a)) val))
 
-(defun clean-list (val a)
-  (let ((dval (default-value val)))
-    (mapcar dval a))
-  )
-
-(defun cleaner (val) (curry #'clean-list val))
 
 (defun map-and-apply (mapper fn &rest a) (apply fn (funcall mapper a)))
 
-(defun filter (pred items) (loop for x in items
-				 for result = (funcall pred x) when result collect x))
-(defun sumlist (a) (apply #'+ a))
-(defun sumeq (a b) (eql (sumlist a) (sumlist b)))
+(defun filter (pred items)
+  (loop for x in items
+	for result = (funcall pred x)
+	when result collect x))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -152,25 +152,32 @@
 	  (mk-tx inventory-acct (* qty cost) 0.0)
 	  (mk-tx payable-acct 0.0 (* qty cost))))
 
-(defmacro get-item ((var-name key table tables) &body body)
-  `(let ((,var-name (gethash ,key (getf ,tables ,table))))
-     ,@body)
-  )
-
 (defmacro get-items ((items tables) &body body)
   `(let ,(loop for i in items collect
 	       `(,(car i) (gethash ,(second i) (getf ,tables ,(third i)))))
      ,@body))
 
-(defun receive-product (sku qty cost accts tables)
-  (get-items (((product sku :products)
-	       (inventory-acct (getf accts :debit) :accounts)
-	       (payable-acct   (getf accts :credit) :accounts))
+
+
+(defun mk-receiver-line (sku qty cost debit credit)
+  (list :sku sku :qty qty :cost cost :debit debit :credit credit))
+
+(defun receive-product (tables &key sku qty cost debit credit)
+  (get-items (((product        sku    :products)
+	       (inventory-acct debit  :accounts)
+	       (payable-acct   credit :accounts))
 	      tables)
     (all ("Invalid receive-product configuration" product inventory-acct payable-acct)
       (multiple-value-bind (a b c)
 	  (receive-product-tx product qty cost inventory-acct payable-acct)
 	(list (put-batch (getf tables :inventory-batch) a) b c)))))
+
+
+;; example with "using"
+;;
+;; (using
+;;  (mk-receiver-line "PROD-002" 6.0 32.78 1401 2001)
+;;  (receive-product *tables*))
 
 
 (defparameter *account-table* (make-hash-table))
