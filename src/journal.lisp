@@ -48,10 +48,22 @@
        (args (cdr using-form)))
     `(let ((,tmp-var ,plist))(apply #',fn (append (list ,@args) ,tmp-var)))))
 
+(defun k (x) (lambda (y) (declare (ignore y)) x))
+
+(defun s (f)
+  (lambda (g)
+    (lambda (x)
+      (funcall (funcall f x) (funcall g x)))))
+
+(defun pass-along (side-effect) (funcall (s #'k) side-effect))
+
+(defmacro b (f g) `(lambda (x) (,f (,g x))))
+
+(setf (symbol-function 'print-return)
+      (pass-along #'(lambda (x) (format t "'~a'~%" x))))
+
 (defun print-map (map) (maphash #'(lambda (k v) (format t "~a => ~a~%" k v)) map))
-
 (defun default-value (val) (curry #'(lambda (a i) (or i a)) val))
-
 
 (defun map-and-apply (mapper fn &rest a) (apply fn (funcall mapper a)))
 
@@ -171,13 +183,11 @@
 	  (receive-product-tx product qty cost inventory-acct payable-acct)
 	(list (put-batch (getf tables :inventory-batch) a) b c)))))
 
-
 ;; example with "using"
 ;;
 ;; (using
 ;;  (mk-receiver-line "PROD-002" 6.0 32.78 1401 2001)
 ;;  (receive-product *tables*))
-
 
 (defparameter *account-table* (make-hash-table))
 (defparameter *product-table* (make-hash-table :test #'EQUAL))
