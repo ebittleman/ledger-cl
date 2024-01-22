@@ -39,14 +39,20 @@
 
 (defmacro all ((msg &rest rest) &body body)
   `(if (and ,@rest)
-      ,@body
-      (error 'value-error :message ,msg)))
+       ,@body
+       (error 'value-error :message ,msg)))
 
 (defmacro using (plist using-form)
   (let((tmp-var (gensym))
        (fn (car using-form))
        (args (cdr using-form)))
     `(let ((,tmp-var ,plist))(apply #',fn (append (list ,@args) ,tmp-var)))))
+
+;; example with "using"
+;;
+;; (using
+;;  (mk-receiver-line "PROD-002" 6.0 32.78 1401 2001)
+;;  (receive-product *tables*))
 
 (defun k (x) (lambda (y) (declare (ignore y)) x))
 
@@ -55,12 +61,18 @@
     (lambda (x)
       (funcall (funcall f x) (funcall g x)))))
 
-(defun pass-along (side-effect) (funcall (s #'k) side-effect))
+(defun sk () (s #'k))
+
+(defun pass-along (side-effect) (funcall (sk) side-effect))
 
 (defmacro b (f g) `(lambda (x) (,f (,g x))))
 
-(setf (symbol-function 'print-return)
-      (pass-along #'(lambda (x) (format t "'~a'~%" x))))
+(defun printarg (x) (format t "'~a'~%" x) nil)
+
+(defun print-return (x) (funcall (pass-along #'printarg) x))
+
+;; (setf (symbol-function 'print-return)
+;;       (pass-along #'(lambda (x) (format t "'~a'~%" x))))
 
 (defun print-map (map) (maphash #'(lambda (k v) (format t "~a => ~a~%" k v)) map))
 (defun default-value (val) (curry #'(lambda (a i) (or i a)) val))
@@ -130,12 +142,28 @@
    items))
 
 (defun build-accts-table (tbl accts)
-    (build-table #'mk-acct #'car tbl accts))
+  (build-table #'mk-acct #'car tbl accts))
 
 (defun mk-tx (acct debit-amt credit-amt)
   (list :acct-number (getf acct :number)
 	:debit debit-amt
 	:credit credit-amt))
+
+(defun sum-tx (&rest rest)
+  (reduce #'(lambda (val item)
+	      (dcons (debit credit val)
+		(cons (+ (getf item :debit) debit)
+		      (+ (getf item :credit) credit))))
+	  rest :initial-value (cons 0.0 0.0)))
+
+(defun tx-balanced? (txs)
+  (dcons (d1 c1 (apply #'sum-tx txs)) (eq d1 c1)))
+
+(defun append-tx (tbl &rest rest)
+  (if (tx-balanced? rest)
+      (loop for tx in rest
+	    do (vector-push-extend tx tbl))
+      (error 'value-error :message "Imbalanced transactions")))
 
 ;; Product
 
@@ -181,13 +209,10 @@
     (all ("Invalid receive-product configuration" product inventory-acct payable-acct)
       (multiple-value-bind (a b c)
 	  (receive-product-tx product qty cost inventory-acct payable-acct)
-	(list (put-batch (getf tables :inventory-batch) a) b c)))))
+	(list (put-batch (getf tables :inventory-batch) a)
+	      (append-tx (getf tables :gl-transactions) b c))))))
 
-;; example with "using"
-;;
-;; (using
-;;  (mk-receiver-line "PROD-002" 6.0 32.78 1401 2001)
-;;  (receive-product *tables*))
+;; State
 
 (defparameter *account-table* (make-hash-table))
 (defparameter *product-table* (make-hash-table :test #'EQUAL))
@@ -228,4 +253,14 @@
   (list
    '("PROD-001" "Example Product")
    '("PROD-002" "Another Product")
-   '("PROD-003" "Last Thing We Work With" 123456)))
+   '("PROD-003" "Mutated List")
+   '("PROD-004" "Last Thing We Work With" 123456)))
+
+;; Interface
+
+(build-accts-table *account-table* *accounts*)
+(build-products-table *product-table* *products*)
+
+(using
+ (mk-receiver-line "PROD-002" 6.0 32.78 1401 2001)
+ (receive-product *tables*))
