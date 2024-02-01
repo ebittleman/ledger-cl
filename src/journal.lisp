@@ -71,10 +71,8 @@
 
 (defun print-return (x) (funcall (pass-along #'printarg) x))
 
-;; (setf (symbol-function 'print-return)
-;;       (pass-along #'(lambda (x) (format t "'~a'~%" x))))
-
 (defun print-map (map) (maphash #'(lambda (k v) (format t "~a => ~a~%" k v)) map))
+
 (defun default-value (val) (curry #'(lambda (a i) (or i a)) val))
 
 (defun map-and-apply (mapper fn &rest a) (apply fn (funcall mapper a)))
@@ -83,6 +81,23 @@
   (loop for x in items
 	for result = (funcall pred x)
 	when result collect x))
+
+(defmacro applyf (getter fn &rest rest)
+  `(setf ,getter (funcall ,fn ,@rest ,getter)))
+
+(defun map-reduce (items mapper reducer &key (initial-value 0.0))
+  (reduce
+   #'(lambda (val x)
+       (let ((mapped (funcall mapper x)))
+	 (if mapped
+	     (funcall reducer val mapped)
+	     val)))
+   items
+   :initial-value initial-value))
+
+;; (map-reduce (gethash "PROD-002" *batch-history-table*)
+;; 	    #'(lambda (x) (if (< 33.0 (getf x :cost)) x nil))
+;; 	    #'(lambda (val x) (+ (getf x :qty) val)))
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
@@ -95,6 +110,11 @@
 (defun wrap-ref (&rest rest)
   (loop
     for i in rest collect (cons i nil)))
+
+(defmacro get-items ((items tables) &body body)
+  `(let ,(loop for i in items collect
+	       `(,(car i) (gethash ,(second i) (getf ,tables ,(third i)))))
+     ,@body))
 
 ;; Ledger and Tx
 
@@ -138,23 +158,33 @@
 
 (defun build-table (map-func key-func tbl items)
   (mapcar
-   #'(lambda (item) (setf (gethash (funcall key-func item) tbl) (apply map-func item)))
+   #'(lambda (item)
+       (setf (gethash (funcall key-func item) tbl)
+	     (apply map-func item)))
    items))
 
 (defun build-accts-table (tbl accts)
   (build-table #'mk-acct #'car tbl accts))
+
+(defun lookup-accts(tables debit credit)
+  (get-items (((debit-acct debit :accounts)
+	       (credit-acct credit  :accounts))
+	      tables)
+    (all ("Invalid Account Number" debit-acct credit-acct)
+      (list debit-acct credit-acct))))
 
 (defun mk-tx (acct debit-amt credit-amt)
   (list :acct-number (getf acct :number)
 	:debit debit-amt
 	:credit credit-amt))
 
+(defun add-tx (acc tx)
+  (dcons (debit credit acc)
+    (cons (+ (getf tx :debit)  debit)
+	  (+ (getf tx :credit) credit))))
+
 (defun sum-tx (&rest rest)
-  (reduce #'(lambda (val item)
-	      (dcons (debit credit val)
-		(cons (+ (getf item :debit) debit)
-		      (+ (getf item :credit) credit))))
-	  rest :initial-value (cons 0.0 0.0)))
+  (reduce #'add-tx rest :initial-value (cons 0.0 0.0)))
 
 (defun tx-balanced? (txs)
   (dcons (d1 c1 (apply #'sum-tx txs)) (eq d1 c1)))
@@ -167,36 +197,55 @@
 
 ;; Product
 
-(defun mk-product (sku name &optional (upc nil))
-  (list :sku sku :name name :upc upc))
+(defun mk-product (sku name inventory-acct cogs-acct &optional (upc nil))
+  (list :sku sku
+	:name name
+	:inventory-acct (getf inventory-acct :number)
+	:cogs-acct (getf cogs-acct :number)
+	:upc upc))
 
-(defun build-products-table (tbl products)
-  (build-table #'mk-product #'car tbl products))
+(defun build-product(sku name &optional (upc nil))
+    #'(lambda (inventory-acct cogs-acct)
+	(mk-product sku name inventory-acct cogs-acct upc)))
 
-(defun mk-inventory-batch (product qty cost)
-  (list :sku (getf product :sku) :qty qty :cost cost :qty-allocated 0))
+(defun construct-product (tables sku name inventory-acct cogs-acct &optional (upc nil))
+  (apply (build-product sku name upc)
+	 (lookup-accts tables inventory-acct cogs-acct)))
 
-(defun get-history (tbl product)
-  (let ((sku (getf product :sku)))
-    (if (and product sku)
-	(let ((history (gethash sku tbl)))
+(defun build-products-table (tbl tables products)
+  (build-table (curry #'construct-product tables) #'car tbl products))
+
+(defun mk-inventory-batch (product inventory-acct qty cost)
+  (list :sku (getf product :sku)
+	:qty qty
+	:cost cost
+	:inventory-acct (getf inventory-acct :number)
+	:cogs-acct (getf product :cogs-acct)))
+
+(defun mk-inventory-allocation (qty batch cogs-acct)
+  (list :sku (getf batch :sku)
+	:qty qty
+	:cost (getf batch :cost)
+	:inventory-acct (getf batch :inventory-acct)
+	:cogs-acct (getf cogs-acct :number)
+	:batch-ref (getf batch :ref)))
+
+(defun get-history (tbl has-sku)
+  (let ((key (getf has-sku :sku)))
+    (if key
+	(let ((history (gethash key tbl)))
 	  (if history history
-	      (setf (gethash sku tbl) (make-array 1 :fill-pointer 0 :adjustable t))))
-	(error 'value-error :message "sku cannot be nil"))))
+	      (setf (gethash key tbl) (make-array 1 :fill-pointer 0 :adjustable t))))
+	(error 'value-error :message "key cannot be nil"))))
 
-(defun put-batch (tbl batch)
-  (vector-push-extend batch (get-history tbl batch)))
+(defun put-inventory-tx (tbl tx)
+  (vector-push-extend tx (get-history tbl tx)))
 
 (defun receive-product-tx (product qty cost inventory-acct payable-acct)
   (let ((amt (* qty cost)))
-    (values (append-ref (mk-inventory-batch product qty cost))
+    (values (append-ref (mk-inventory-batch product inventory-acct qty cost))
 	    (mk-tx inventory-acct amt 0.0)
 	    (mk-tx payable-acct 0.0 amt))))
-
-(defmacro get-items ((items tables) &body body)
-  `(let ,(loop for i in items collect
-	       `(,(car i) (gethash ,(second i) (getf ,tables ,(third i)))))
-     ,@body))
 
 (defun mk-receiver-line (sku qty cost debit credit)
   (list :sku sku :qty qty :cost cost :debit debit :credit credit))
@@ -207,16 +256,69 @@
 	       (payable-acct   credit :accounts))
 	      tables)
     (all ("Invalid receive-product configuration" product inventory-acct payable-acct)
-      (multiple-value-bind (a b c)
+      (multiple-value-bind (batch debit-tx credit-tx)
 	  (receive-product-tx product qty cost inventory-acct payable-acct)
-	(list (put-batch (getf tables :inventory-batch) a)
-	      (append-tx (getf tables :gl-transactions) b c))))))
+	(list (put-inventory-tx (getf tables :inventory-batch) batch)
+	      (append-tx (getf tables :gl-transactions) debit-tx credit-tx))))))
+
+
+(defun select-vector (from where)
+  (loop for x across from
+	when (funcall where x)
+	  collect x))
+
+(defun batch-match (batch alloc)
+  (equal (getf batch :ref) (getf alloc :batch-ref)))
+
+(defun calculate-allocated (tables batch)
+  (let* ((allocation-history (get-history (getf tables :inventory-allocations) batch))
+	 (filtered (select-vector allocation-history (curry #'batch-match batch))))
+    (reduce #'(lambda (val x) (+ val (getf x :qty)))
+	    filtered
+	    :initial-value 0.0)))
+
+(defun find-batches (tables sku qty-wanted)
+  (get-items (((product sku :products)) tables)
+    (loop with qty-needed = qty-wanted
+          for batch across (get-history (getf tables :inventory-batch) product)
+	  for avail = (- (getf batch :qty) (calculate-allocated tables batch))
+	  until (<= qty-needed 0)
+	  when (> avail 0)
+	    do (setf qty-needed (- qty-needed avail))
+	  when (> avail 0)
+	    collect (cons batch (+ avail (min 0 qty-needed))))))
+
+(defun build-allocation(qty batch)
+  #'(lambda (debit-acct credit-acct)
+      (let ((amt (* qty (getf batch :cost))))
+	(list (append-ref (mk-inventory-allocation qty batch debit-acct))
+		(mk-tx credit-acct 0.0 amt)
+		(mk-tx debit-acct amt 0.0)))))
+
+(defun construct-allocation (tables debit-acct x)
+  (apply (build-allocation (cdr x) (car x))
+	 (lookup-accts tables debit-acct (getf (car x) :inventory-acct))))
+
+(defun release-product-tx (tables sku qty-wanted debit-acct)
+  (let* ((batches (find-batches tables sku qty-wanted))
+         (qty-found (apply #'+ (mapcar #'(lambda (x) (cdr x)) batches))))
+    (if (= qty-found qty-wanted)
+	(mapcar (curry #'construct-allocation tables debit-acct) batches))))
+
+(defun release-product (tables sku qty-wanted debit-acct)
+  (let ((txs (release-product-tx tables sku qty-wanted debit-acct)))
+    (loop for it in txs
+	  collect
+	  (destructuring-bind (inv-tx debit-tx credit-tx) it
+	    (list (put-inventory-tx (getf tables :inventory-allocations) inv-tx)
+		  (append-tx (getf tables :gl-transactions) debit-tx credit-tx))))))
 
 ;; State
 
 (defparameter *account-table* (make-hash-table))
 (defparameter *product-table* (make-hash-table :test #'EQUAL))
 (defparameter *batch-history-table* (make-hash-table :test #'EQUAL))
+(defparameter *allocations-history-table* (make-hash-table :test #'EQUAL))
 (defparameter *transactions* (make-array 1 :fill-pointer 0 :adjustable t))
 
 (defparameter *tables*
@@ -224,6 +326,7 @@
    :accounts *account-table*
    :products *product-table*
    :inventory-batch *batch-history-table*
+   :inventory-allocations *allocations-history-table*
    :gl-transactions *transactions*))
 
 (defparameter *accounts*
@@ -249,18 +352,21 @@
    '(6001 :expense "General Expenses")
    ))
 
+(build-accts-table *account-table* *accounts*)
+
 (defparameter *products*
   (list
-   '("PROD-001" "Example Product")
-   '("PROD-002" "Another Product")
-   '("PROD-003" "Mutated List")
-   '("PROD-004" "Last Thing We Work With" 123456)))
+   '("PROD-001" "Example Product" 1401 5001)
+   '("PROD-002" "Another Product" 1401 5001)
+   '("PROD-003" "Mutated List" 1402 5001)
+   '("PROD-004" "Last Thing We Work With" 1402 5001 123456)))
 
 ;; Interface
 
-(build-accts-table *account-table* *accounts*)
-(build-products-table *product-table* *products*)
+(build-products-table *product-table* *tables* *products*)
 
 (using
- (mk-receiver-line "PROD-002" 6.0 32.78 1401 2001)
+ (mk-receiver-line "PROD-002" 5.0 36.78 1402 2001)
  (receive-product *tables*))
+
+(release-product *tables* "PROD-002" 6 5001)
