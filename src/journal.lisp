@@ -54,6 +54,8 @@
 ;;  (mk-receiver-line "PROD-002" 6.0 32.78 1401 2001)
 ;;  (receive-product *tables*))
 
+(defun ident (x) x)
+
 (defun k (x) (lambda (y) (declare (ignore y)) x))
 
 (defun s (f)
@@ -215,51 +217,77 @@
 (defun build-products-table (tbl tables products)
   (build-table (curry #'construct-product tables) #'car tbl products))
 
-(defun mk-inventory-batch (product inventory-acct qty cost)
+(defun build-locations-table (tbl locations)
+  (build-table #'ident #'car tbl locations))
+
+(defun mk-inventory-batch
+    (product inventory-acct qty cost location)
   (list :sku (getf product :sku)
 	:qty qty
 	:cost cost
 	:inventory-acct (getf inventory-acct :number)
-	:cogs-acct (getf product :cogs-acct)))
+	:cogs-acct (getf product :cogs-acct)
+	:location location))
 
-(defun mk-inventory-allocation (qty batch cogs-acct)
+(defun mk-inventory-allocation (qty batch cogs-acct location)
   (list :sku (getf batch :sku)
 	:qty qty
 	:cost (getf batch :cost)
 	:inventory-acct (getf batch :inventory-acct)
 	:cogs-acct (getf cogs-acct :number)
+	:location location
 	:batch-ref (getf batch :ref)))
+
+(defmacro getorset (key ctor)
+  (let ((var (gensym)))
+    `(let ((,var ,key))
+       (if ,var ,var
+	   (setf ,key ,ctor)))))
 
 (defun get-history (tbl has-sku)
   (let ((key (getf has-sku :sku)))
     (if key
-	(let ((history (gethash key tbl)))
-	  (if history history
-	      (setf (gethash key tbl) (make-array 1 :fill-pointer 0 :adjustable t))))
+	(getorset (gethash key tbl)
+		  (make-array 1 :fill-pointer 0 :adjustable t))
 	(error 'value-error :message "key cannot be nil"))))
 
 (defun put-inventory-tx (tbl tx)
   (vector-push-extend tx (get-history tbl tx)))
 
-(defun receive-product-tx (product qty cost inventory-acct payable-acct)
+(defun receive-product-tx
+    (product qty cost
+     inventory-acct payable-acct
+     location)
   (let ((amt (* qty cost)))
-    (values (append-ref (mk-inventory-batch product inventory-acct qty cost))
-	    (mk-tx inventory-acct amt 0.0)
-	    (mk-tx payable-acct 0.0 amt))))
+    (values
+     (append-ref (mk-inventory-batch product inventory-acct
+				     qty cost location))
+     (mk-tx inventory-acct amt 0.0)
+     (mk-tx payable-acct 0.0 amt))))
 
-(defun mk-receiver-line (sku qty cost debit credit)
-  (list :sku sku :qty qty :cost cost :debit debit :credit credit))
+(defun mk-receiver-line (sku qty cost debit credit &optional (location :default))
+  (list :sku sku
+	:qty qty
+	:cost cost
+	:debit debit
+	:credit credit
+	:location location))
 
-(defun receive-product (tables &key sku qty cost debit credit)
+(defun receive-product (tables &key sku qty cost debit credit (location :default))
   (get-items (((product        sku    :products)
 	       (inventory-acct debit  :accounts)
-	       (payable-acct   credit :accounts))
+	       (payable-acct   credit :accounts)
+	       (loc       location    :locations))
 	      tables)
-    (all ("Invalid receive-product configuration" product inventory-acct payable-acct)
+    (all ("Invalid receive-product configuration"
+	  product inventory-acct payable-acct loc)
       (multiple-value-bind (batch debit-tx credit-tx)
-	  (receive-product-tx product qty cost inventory-acct payable-acct)
+	  (receive-product-tx product qty cost
+			      inventory-acct payable-acct
+			      loc)
 	(list (put-inventory-tx (getf tables :inventory-batch) batch)
-	      (append-tx (getf tables :gl-transactions) debit-tx credit-tx))))))
+	      (append-tx (getf tables :gl-transactions)
+			 debit-tx credit-tx))))))
 
 
 (defun select-vector (from where)
@@ -289,24 +317,29 @@
 	    collect (cons batch (+ avail (min 0 qty-needed))))))
 
 (defun build-allocation(qty batch)
-  #'(lambda (debit-acct credit-acct)
+  #'(lambda (debit-acct credit-acct location)
       (let ((amt (* qty (getf batch :cost))))
-	(list (append-ref (mk-inventory-allocation qty batch debit-acct))
+	(list (append-ref (mk-inventory-allocation qty batch debit-acct location))
 		(mk-tx credit-acct 0.0 amt)
 		(mk-tx debit-acct amt 0.0)))))
 
-(defun construct-allocation (tables debit-acct x)
-  (apply (build-allocation (cdr x) (car x))
-	 (lookup-accts tables debit-acct (getf (car x) :inventory-acct))))
 
-(defun release-product-tx (tables sku qty-wanted debit-acct)
+(defun construct-allocation (tables debit-acct loc x)
+  (apply (build-allocation (cdr x) (car x))
+	 (get-items (((debit   debit-acct                    :accounts)
+		      (credit (getf (car x) :inventory-acct) :accounts)
+		      (location loc                          :locations))
+		     tables)
+	   (list debit credit location))))
+
+(defun release-product-tx (tables sku qty-wanted debit-acct location)
   (let* ((batches (find-batches tables sku qty-wanted))
          (qty-found (apply #'+ (mapcar #'(lambda (x) (cdr x)) batches))))
     (if (= qty-found qty-wanted)
-	(mapcar (curry #'construct-allocation tables debit-acct) batches))))
+	(mapcar (curry #'construct-allocation tables debit-acct location) batches))))
 
-(defun release-product (tables sku qty-wanted debit-acct)
-  (let ((txs (release-product-tx tables sku qty-wanted debit-acct)))
+(defun release-product (tables sku qty-wanted debit-acct location)
+  (let ((txs (release-product-tx tables sku qty-wanted debit-acct location)))
     (loop for it in txs
 	  collect
 	  (destructuring-bind (inv-tx debit-tx credit-tx) it
@@ -319,6 +352,8 @@
 (defparameter *product-table* (make-hash-table :test #'EQUAL))
 (defparameter *batch-history-table* (make-hash-table :test #'EQUAL))
 (defparameter *allocations-history-table* (make-hash-table :test #'EQUAL))
+(defparameter *locations-table* (make-hash-table))
+
 (defparameter *transactions* (make-array 1 :fill-pointer 0 :adjustable t))
 
 (defparameter *tables*
@@ -327,6 +362,7 @@
    :products *product-table*
    :inventory-batch *batch-history-table*
    :inventory-allocations *allocations-history-table*
+   :locations *locations-table*
    :gl-transactions *transactions*))
 
 (defparameter *accounts*
@@ -361,12 +397,20 @@
    '("PROD-003" "Mutated List" 1402 5001)
    '("PROD-004" "Last Thing We Work With" 1402 5001 123456)))
 
+(defparameter *locations*
+  (list
+   '(:shipped)
+   '(:default)
+   ))
+
+(build-locations-table *locations-table* *locations*)
+
 ;; Interface
 
 (build-products-table *product-table* *tables* *products*)
 
 (using
- (mk-receiver-line "PROD-002" 5.0 36.78 1402 2001)
+ (mk-receiver-line "PROD-002" 5.0 36.78 1401 2001 :default)
  (receive-product *tables*))
 
-(release-product *tables* "PROD-002" 6 5001)
+(release-product *tables* "PROD-002" 6 5001 :shipped)
